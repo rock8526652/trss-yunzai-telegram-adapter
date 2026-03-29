@@ -991,7 +991,9 @@ const adapter = new class TelegramAdapter {
         data.sender = {
             user_id: data.user_id,
             nickname: ctx.from.first_name || ctx.from.username || "Unknown",
+            is_bot: !!ctx.from.is_bot,
         }
+        data.is_bot = !!ctx.from.is_bot;
         data.bot.fl.set(data.user_id, { ...ctx.from, ...data.sender })
         data.message_type = ctx.chat.type === "supergroup" ? "group" : ctx.chat.type;
         data.message = [];
@@ -1201,7 +1203,9 @@ const adapter = new class TelegramAdapter {
                     base.sender = {
                         user_id: base.user_id,
                         nickname: first.from.first_name || first.from.username || "Unknown",
+                        is_bot: !!first.from.is_bot,
                     };
+                    base.is_bot = !!first.from.is_bot;
                     base.bot.fl.set(base.user_id, { ...first.from, ...base.sender });
                     base.message_type = first.chat.type === "supergroup" ? "group" : first.chat.type;
                     base.message = [];
@@ -1286,7 +1290,9 @@ const adapter = new class TelegramAdapter {
             data.sender = {
                 user_id: data.user_id,
                 nickname: from.first_name || from.username || "Unknown",
+                is_bot: !!from.is_bot,
             };
+            data.is_bot = !!from.is_bot;
             data.bot.fl.set(data.user_id, { ...from, ...data.sender });
 
             // 消息制作
