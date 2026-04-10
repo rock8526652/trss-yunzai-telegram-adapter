@@ -1000,12 +1000,15 @@ const adapter = new class TelegramAdapter {
         data.message_id = ctx.message.message_id;
         data.id = ctx.chat.id;
         data.entities = ctx.message.entities || ctx.message.caption_entities || [];
+        data.reply_markup = ctx.message.reply_markup;
         data.reply = (msg, clear = false, opts = {}) => {
             const reply_id = Array.isArray(data.message_id) ? data.message_id[0] : data.message_id;
             return this.sendMsg(data, msg, { ...opts, clear_history: clear, reply_to_message_id: reply_id })
         }
+        const text = ctx.message.text || ctx.message.caption || ""
         data.raw_message = "";
-        data.is_forward = !!(ctx.message.forward_origin || ctx.message.forward_from || ctx.message.forward_from_chat);
+        // data.msg = text; // Yunzai 插件通常依赖 e.msg，但框架会自动根据 message 生成，手动赋值可能导致翻倍
+        data.is_forward = !!(ctx.message.forward_origin || ctx.message.forward_from || ctx.message.forward_from_chat || ctx.message.forward_sender_name);
 
         const replyTo = ctx.message.reply_to_message;
         if (replyTo?.message_id) {
@@ -1013,7 +1016,6 @@ const adapter = new class TelegramAdapter {
         }
 
         // 消息内容 (普通文本)
-        const text = ctx.message.text || ctx.message.caption || ""
         if (text) {
             // 解析 entities 生成结构化消息段
             const entities = ctx.message.entities || ctx.message.caption_entities || [];
@@ -1024,7 +1026,7 @@ const adapter = new class TelegramAdapter {
             } else {
                 data.message.push({ type: "text", text: text });
             }
-            data.raw_message += text;
+            data.raw_message += text; // 累加文本到 raw_message
         }
 
         // 媒体内容处理
@@ -1213,6 +1215,8 @@ const adapter = new class TelegramAdapter {
                     base.message_id = base.message_ids; // TRSS-Yunzai 习惯上在这里放数组或单个ID
                     base.id = first.chat.id;
                     base.entities = first.message.entities || first.message.caption_entities || [];
+                    base.reply_markup = first.message.reply_markup;
+                    base.is_forward = !!(first.message.forward_origin || first.message.forward_from || first.message.forward_from_chat || first.message.forward_sender_name);
                     base.reply = (msg, clear = false, opts = {}) => {
                         const reply_id = Array.isArray(base.message_id) ? base.message_id[0] : base.message_id;
                         return this.sendMsg(base, msg, { ...opts, clear_history: clear, reply_to_message_id: reply_id })
@@ -1230,6 +1234,10 @@ const adapter = new class TelegramAdapter {
                             base.message.push({ type: "image", file_id: photo.file_id, file_unique_id: photo.file_unique_id });
                         } else if (mctx.message.video) {
                             base.message.push({ type: "video", file_id: mctx.message.video.file_id });
+                        } else if (mctx.message.animation) {
+                            base.message.push({ type: "video", file_id: mctx.message.animation.file_id, file_name: mctx.message.animation.file_name });
+                        } else if (mctx.message.sticker) {
+                            base.message.push({ type: "sticker", file_id: mctx.message.sticker.file_id, file_unique_id: mctx.message.sticker.file_unique_id });
                         } else if (mctx.message.document) {
                             base.message.push({ type: "file", file_id: mctx.message.document.file_id, file_name: mctx.message.document.file_name });
                         }
@@ -1297,7 +1305,6 @@ const adapter = new class TelegramAdapter {
 
             // 消息制作
             data.message = [{ type: "text", text: callbackData }];
-            data.msg = callbackData;
             data.raw_message = callbackData;
 
             // 附加回调原始信息，方便高级插件使用
