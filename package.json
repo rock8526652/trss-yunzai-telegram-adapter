@@ -4,6 +4,6 @@
   "author": "zhiyu1998",
   "dependencies": {
     "@grammyjs/auto-retry": "^2.0.2",
-    "grammy": "^1.28.0"
+    "grammy": "^1.43.0"
   }
 }
