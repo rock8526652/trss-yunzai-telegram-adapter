@@ -1001,6 +1001,7 @@ const adapter = new class TelegramAdapter {
         data.id = ctx.chat.id;
         data.entities = ctx.message.entities || ctx.message.caption_entities || [];
         data.reply_markup = ctx.message.reply_markup;
+        data.via_bot = ctx.message.via_bot;
         data.reply = (msg, clear = false, opts = {}) => {
             const reply_id = Array.isArray(data.message_id) ? data.message_id[0] : data.message_id;
             return this.sendMsg(data, msg, { ...opts, clear_history: clear, reply_to_message_id: reply_id })
@@ -1216,6 +1217,7 @@ const adapter = new class TelegramAdapter {
                     base.id = first.chat.id;
                     base.entities = first.message.entities || first.message.caption_entities || [];
                     base.reply_markup = first.message.reply_markup;
+                    base.via_bot = first.message.via_bot;
                     base.is_forward = !!(first.message.forward_origin || first.message.forward_from || first.message.forward_from_chat || first.message.forward_sender_name);
                     base.reply = (msg, clear = false, opts = {}) => {
                         const reply_id = Array.isArray(base.message_id) ? base.message_id[0] : base.message_id;
@@ -1507,6 +1509,7 @@ const adapter = new class TelegramAdapter {
                 },
                 raw_message: m.text || m.caption || "",
                 entities: m.entities || m.caption_entities || [],
+                via_bot: m.via_bot,
                 raw: m,
             };
 
