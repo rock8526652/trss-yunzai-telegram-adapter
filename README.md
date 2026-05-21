@@ -21,6 +21,8 @@
 
    > // 安装依赖  
    > pnpm install grammy -w
+   > pnpm install @grammyjs/auto-retry -w
+   
 3. 打开：[BotFather](https://t.me/BotFather) 创建 Bot：  
 
    - /newbot  
