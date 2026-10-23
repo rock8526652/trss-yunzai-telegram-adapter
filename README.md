@@ -23,6 +23,9 @@
    > pnpm install grammy -w
    > 
    > pnpm install @grammyjs/auto-retry -w
+   > 
+   > // 仅在使用 SOCKS5 代理时需要（http/https 代理不需要额外安装）
+   > pnpm install socks-proxy-agent -w
    
 3. 打开：[BotFather](https://t.me/BotFather) 创建 Bot：  
 
@@ -40,9 +43,23 @@
 
 ## 🎓 使用教程
 
-- #TG账号
-- #TG设置 + `Token`
-- #TG代理/反代 + `scheme://[userinfo@]host[:port]`
+| 指令 | 说明 |
+| --- | --- |
+| `#TG账号` | 查看已连接的账号 |
+| `#TG设置` + `Token` | 添加 / 删除账号（再次发送同一 Token 即删除） |
+| `#TG代理` + `scheme://[userinfo@]host[:port]` | 网络代理，支持 `http://` `https://` `socks5://` |
+| `#TG反代` + `https://your-api-server` | 反向代理 / 自建 Bot API Server 地址 |
+| `#TG超时` + `600` | 单次请求超时秒数；不带参数恢复默认（500s） |
+
+> **代理 vs 反代**：「代理」是客户端经中转节点访问 `api.telegram.org`；「反代」是把 grammY 的 `apiRoot` 整体换成你自己的域名，通常配合自建 Bot API Server 使用，也能突破本地 Bot API 的文件大小限制。
+
+## 📦 依赖版本
+
+| 依赖 | 版本 |
+| --- | --- |
+| grammy | `^1.46.0`（支持 Bot API 10.3） |
+| @grammyjs/auto-retry | `^2.0.2` |
+| socks-proxy-agent | 可选，仅 SOCKS 代理需要 |
 
 ## 🐛 问题
 

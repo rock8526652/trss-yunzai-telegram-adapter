@@ -1,7 +1,30 @@
 import fs from "fs"
 import path from "path"
-const grammyPkgPath = path.resolve(process.cwd(), "node_modules/grammy/package.json")
-const grammyVersion = JSON.parse(fs.readFileSync(grammyPkgPath, "utf-8")).version
+import { createRequire } from "module"
+
+/**
+ * 读取 grammY 版本号（读取失败不影响插件加载）
+ * @returns {string}
+ */
+function readGrammyVersion() {
+    // 优先用 require 解析（能正确处理 pnpm / monorepo 的软链结构）
+    try {
+        const require = createRequire(import.meta.url)
+        return JSON.parse(fs.readFileSync(require.resolve("grammy/package.json"), "utf-8")).version
+    } catch { }
+    // 回退：按 Yunzai 常见的 node_modules 布局查找
+    for (const dir of [
+        path.resolve(process.cwd(), "node_modules/grammy/package.json"),
+        path.resolve(process.cwd(), "plugins/adapter/node_modules/grammy/package.json"),
+    ]) {
+        try {
+            return JSON.parse(fs.readFileSync(dir, "utf-8")).version
+        } catch { }
+    }
+    return "unknown"
+}
+
+const grammyVersion = readGrammyVersion()
 
 import makeConfig from "../../lib/plugins/config.js"
 import { Bot as GrammyBot, InputFile, InlineKeyboard, Keyboard } from "grammy";
@@ -9,8 +32,6 @@ import { HttpsProxyAgent } from "https-proxy-agent";
 import { fileTypeFromBuffer } from "file-type";
 import imageSize from "image-size";
 import { autoRetry } from "@grammyjs/auto-retry";
-
-process.env.NTBA_FIX_350 = 1
 
 /**
  * Redis 缓存辅助函数：存储 callback_data 超长映射
@@ -174,6 +195,7 @@ const { config, configSave } = await makeConfig("Telegram", {
     permission: "master",
     proxy: "",
     reverseProxy: "",
+    timeoutSeconds: 0,
     token: [],
 }, {
     tips: [
@@ -718,10 +740,13 @@ const adapter = new class TelegramAdapter {
             const me = await ctx.bot.api.getMe();
             // 获取头像
             const photos = await ctx.bot.api.getUserProfilePhotos(me.id);
-            // 制作成URL
-            const fileId = photos.photos[0][0].file_id;
+            const fileId = photos?.photos?.[0]?.[0]?.file_id;
+            if (!fileId) return false;
             const file = await ctx.bot.api.getFile(fileId);
-            return `https://api.telegram.org/file/bot${ctx.bot.token}/${file.file_path}`;
+            if (!file?.file_path) return false;
+            // 自建 / 反代 Bot API Server 时 file_path 是本地路径，需要拼当前 apiRoot
+            const apiRoot = (ctx.bot.apiRoot || "https://api.telegram.org").replace(/\/+$/, "");
+            return `${apiRoot}/file/bot${ctx.bot.token}/${file.file_path}`;
         } catch (err) {
             logger.error(`获取头像错误：${logger.red(err)}`)
             return false
@@ -1128,16 +1153,37 @@ const adapter = new class TelegramAdapter {
      * @returns {Promise<boolean>} - 连接是否成功
      */
     async connect(token) {
-        const agent = config.proxy ? new HttpsProxyAgent(config.proxy) : undefined;
-        const grammyBot = new GrammyBot(token, {
-            client: {
-                baseFetchConfig: {
-                    baseUrl: config.reverseProxy || 'https://api.telegram.org', // Default base URL
-                    agent, // Proxy agent if defined
-                },
-            },
-        });
-        grammyBot.api.config.use(autoRetry());
+        // 反代地址：grammY 的正确选项是 client.apiRoot，而不是 baseFetchConfig.baseUrl
+        // baseFetchConfig 里只接受 fetch 的 init 选项（agent / compress / duplex 等），
+        // 之前写 baseUrl 会被 node-fetch 直接忽略，导致 #TG反代 实际从未生效
+        const apiRoot = (config.reverseProxy || "https://api.telegram.org").replace(/\/+$/, "");
+        const proxy = (config.proxy || "").trim();
+
+        const client = { apiRoot };
+        // 自建 Bot API Server 时可放宽单次请求超时（默认 500s 与官方硬编码上限一致）
+        if (config.timeoutSeconds) client.timeoutSeconds = Number(config.timeoutSeconds);
+        if (proxy) {
+            // grammY 在 Node 下默认使用 node-fetch v2，只认 `agent`（不认 undici 的 dispatcher）
+            // 覆盖 baseFetchConfig 会丢失 grammY 默认注入的 compress/duplex，需手动补回
+            const baseFetchConfig = { compress: true, duplex: "half" };
+            if (/^socks(4|4a|5h?)?:\/\//i.test(proxy)) {
+                // SOCKS 代理必须用 socks-proxy-agent，HttpsProxyAgent 只支持 http/https
+                const socksMod = await import("socks-proxy-agent").catch(() => null);
+                const SocksProxyAgent = socksMod?.SocksProxyAgent ?? socksMod?.default;
+                if (!SocksProxyAgent) {
+                    throw new Error("使用 SOCKS 代理需先安装 socks-proxy-agent：pnpm add socks-proxy-agent -w");
+                }
+                baseFetchConfig.agent = new SocksProxyAgent(proxy, true);
+            } else {
+                baseFetchConfig.agent = new HttpsProxyAgent(proxy);
+            }
+            client.baseFetchConfig = baseFetchConfig;
+        }
+
+        const grammyBot = new GrammyBot(token, { client });
+        // 失败自动重试（429 限流 / 5xx / 网络抖动）
+        grammyBot.api.config.use(autoRetry({ maxRetryDelay: 10000 }));
+
         // 格莱美初始化
         await grammyBot.init();
         grammyBot.info = await grammyBot.botInfo;
@@ -1150,6 +1196,7 @@ const adapter = new class TelegramAdapter {
 
         // 配置信息
         Bot[id] = grammyBot;
+        Bot[id].apiRoot = apiRoot
         if (!Bot.uin.includes(id)) Bot.uin.push(id)
         Bot[id].adapter = this;
         Bot[id].uid = id;
@@ -1540,6 +1587,26 @@ const adapter = new class TelegramAdapter {
             await this.connect(token);
         }
     }
+
+    /**
+     * 断开所有账号连接
+     * 停止长轮询并从 Bot 列表中注销，避免重复加载时残留旧实例
+     * @returns {Promise<void>}
+     */
+    async unload() {
+        for (const bot of Object.values(Bot)) {
+            if (bot?.isBot !== true) continue;
+            try {
+                await bot.stop();
+                delete Bot[bot.uid];
+                if (bot.uin) {
+                    Bot.uin = Bot.uin.filter(v => v !== bot.uin);
+                }
+            } catch (err) {
+                Bot.makeLog("error", `停止轮询失败：${err.message}`, bot.uid);
+            }
+        }
+    }
 }
 
 Bot.adapter.push(adapter)
@@ -1564,6 +1631,11 @@ export class Telegram extends plugin {
                 {
                     reg: "^#[Tt][Gg](代理|反代)",
                     fnc: "Proxy",
+                    permission: config.permission,
+                },
+                {
+                    reg: "^#[Tt][Gg]超时",
+                    fnc: "Timeout",
                     permission: config.permission,
                 }
             ]
@@ -1593,14 +1665,34 @@ export class Telegram extends plugin {
     }
 
     async Proxy() {
-        const proxy = this.e.msg.replace(/^#[Tt][Gg](代理|反代)/, "").trim()
-        if (this.e.msg.match("代理")) {
-            config.proxy = proxy
-            this.reply(`代理已${proxy ? "设置" : "删除"}，重启后生效`, true)
+        const raw = this.e.msg.replace(/^#[Tt][Gg](代理|反代)/, "").trim()
+        const isProxy = /代理/.test(this.e.msg)
+        // 允许「#TG反代」不带参数 => 传入空串 => 删除反代
+        if (!isProxy && raw) {
+            // 归一化：去掉结尾斜杠，避免拼出 //bot<token>/xxx
+            config.reverseProxy = raw.replace(/\/+$/, "")
+            this.reply(`反代已设为 ${config.reverseProxy}，重启后生效`, true)
+        } else if (isProxy && raw) {
+            config.proxy = raw
+            this.reply(`代理已设为 ${raw}，重启后生效`, true)
         } else {
-            config.reverseProxy = proxy
-            this.reply(`反代已${proxy ? "设置" : "删除"}，重启后生效`, true)
+            if (isProxy) config.proxy = ""
+            else config.reverseProxy = ""
+            this.reply(`${isProxy ? "代理" : "反代"}已删除，重启后生效`, true)
         }
+        await configSave()
+    }
+
+    async Timeout() {
+        const raw = this.e.msg.replace(/^#[Tt][Gg]超时/, "").trim()
+        const sec = Number(raw)
+        if (raw && (!Number.isFinite(sec) || sec < 0)) {
+            return this.reply("格式错误，示例：#TG超时600", true)
+        }
+        config.timeoutSeconds = Number.isFinite(sec) ? sec : 0
+        this.reply(config.timeoutSeconds
+            ? `请求超时已设为 ${config.timeoutSeconds} 秒，重启后生效`
+            : "请求超时已恢复默认值（500s），重启后生效", true)
         await configSave()
     }
 }
