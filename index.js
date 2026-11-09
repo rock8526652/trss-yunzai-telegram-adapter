@@ -1002,6 +1002,67 @@ const adapter = new class TelegramAdapter {
     }
 
     /**
+     * 解析 rich_message（富文本块消息）为纯文本 + entities
+     * 结构示例：{ blocks: [{ type: "paragraph", text: { type: "bold", text: [ "详情 ", { type: "mention", text: "@xx", username: "xx" } ] } }] }
+     * @returns {{ text: string, entities: Array }}
+     */
+    parseRichMessage(rich) {
+        let text = "";
+        const entities = [];
+        const ENTITY_TYPES = ["mention", "text_mention", "url", "text_link", "hashtag", "cashtag", "email", "phone_number", "bot_command"];
+        const walk = (node, depth = 0) => {
+            if (node == null || depth > 20) return;
+            if (typeof node === "string" || typeof node === "number") {
+                text += String(node);
+                return;
+            }
+            if (Array.isArray(node)) {
+                for (const n of node) walk(n, depth + 1);
+                return;
+            }
+            if (typeof node !== "object") return;
+            const start = text.length;
+            for (const key of ["text", "items", "blocks", "children", "content", "caption"]) {
+                if (node[key] !== undefined) walk(node[key], depth + 1);
+            }
+            const length = text.length - start;
+            if (ENTITY_TYPES.includes(node.type) && length > 0) {
+                const ent = { type: node.type, offset: start, length };
+                if (node.url) ent.url = node.url;
+                if (node.username) ent.username = node.username;
+                if (node.user) ent.user = node.user;
+                entities.push(ent);
+            } else if (node.url && length > 0) {
+                // 未知类型但带链接的节点，按 text_link 处理
+                entities.push({ type: "text_link", offset: start, length, url: node.url });
+            }
+        };
+        const blocks = Array.isArray(rich?.blocks) ? rich.blocks : [rich];
+        blocks.forEach((block, i) => {
+            if (i > 0) text += "\n";
+            walk(block);
+        });
+        entities.sort((a, b) => a.offset - b.offset);
+        return { text: text.trim() ? text : "", entities };
+    }
+
+    /**
+     * 统一提取消息文本与 entities（text / caption / rich_message）
+     */
+    extractText(msg) {
+        if (msg?.text) return { text: msg.text, entities: msg.entities || [] };
+        if (msg?.caption) return { text: msg.caption, entities: msg.caption_entities || [] };
+        if (msg?.rich_message) {
+            try {
+                return this.parseRichMessage(msg.rich_message);
+            } catch (err) {
+                Bot.makeLog("warn", ["rich_message 解析失败", err]);
+            }
+        }
+        return { text: "", entities: [] };
+    }
+
+    /**
      * 制作适配器消息的内容（核心，需要把这个写好）
      * @param ctx 格莱美的上下文
      */
@@ -1024,27 +1085,33 @@ const adapter = new class TelegramAdapter {
         data.message = [];
         data.message_id = ctx.message.message_id;
         data.id = ctx.chat.id;
-        data.entities = ctx.message.entities || ctx.message.caption_entities || [];
+        const extracted = this.extractText(ctx.message);
+        data.entities = extracted.entities;
         data.reply_markup = ctx.message.reply_markup;
         data.via_bot = ctx.message.via_bot;
         data.reply = (msg, clear = false, opts = {}) => {
             const reply_id = Array.isArray(data.message_id) ? data.message_id[0] : data.message_id;
             return this.sendMsg(data, msg, { ...opts, clear_history: clear, reply_to_message_id: reply_id })
         }
-        const text = ctx.message.text || ctx.message.caption || ""
-        data.raw_message = "";
-        // data.msg = text; // Yunzai 插件通常依赖 e.msg，但框架会自动根据 message 生成，手动赋值可能导致翻倍
+        const text = extracted.text
+        data.raw_message = text;
+        // 仅在无文本时显式初始化为空字符串，避免 undefined 导致正则误判或 Bot.String 打印对象；
+        // 存在文本时不可在此处预先赋值 data.msg，否则 Yunzai loader.js (dealEvent) 会在遍历 message 时再次拼接 text 导致消息文本翻倍（如“簽到”变“簽到簽到”）
+        if (!text) {
+            data.msg = "";
+        }
         data.is_forward = !!(ctx.message.forward_origin || ctx.message.forward_from || ctx.message.forward_from_chat || ctx.message.forward_sender_name);
 
+        data.source = ctx.message;
         const replyTo = ctx.message.reply_to_message;
         if (replyTo?.message_id) {
-            data.message.push({ type: "reply", id: replyTo.message_id, text: replyTo.text || replyTo.caption || "" });
+            data.message.push({ type: "reply", id: replyTo.message_id, text: this.extractText(replyTo).text });
         }
 
         // 消息内容 (普通文本)
         if (text) {
             // 解析 entities 生成结构化消息段
-            const entities = ctx.message.entities || ctx.message.caption_entities || [];
+            const entities = extracted.entities;
             if (entities.length > 0) {
                 // 按 offset 排序并解析
                 const parsedSegments = this.parseEntities(text, entities);
@@ -1052,7 +1119,6 @@ const adapter = new class TelegramAdapter {
             } else {
                 data.message.push({ type: "text", text: text });
             }
-            data.raw_message += text; // 累加文本到 raw_message
         }
 
         // 媒体内容处理
@@ -1060,7 +1126,14 @@ const adapter = new class TelegramAdapter {
             const photo = ctx.message.photo[ctx.message.photo.length - 1]
             data.message.push({ type: "image", file_id: photo.file_id, file_unique_id: photo.file_unique_id })
         } else if (ctx.message.sticker) {
-            data.message.push({ type: "sticker", file_id: ctx.message.sticker.file_id })
+            data.sticker = ctx.message.sticker;
+            data.message.push({
+                type: "sticker",
+                file_id: ctx.message.sticker.file_id,
+                file_unique_id: ctx.message.sticker.file_unique_id,
+                set_name: ctx.message.sticker.set_name,
+                emoji: ctx.message.sticker.emoji
+            })
         } else if (ctx.message.video) {
             data.message.push({ type: "video", file_id: ctx.message.video.file_id })
         } else if (ctx.message.voice) {
@@ -1080,6 +1153,7 @@ const adapter = new class TelegramAdapter {
             })
         } else if (ctx.message.contact) {
             // 联系人
+            data.contact = ctx.message.contact;
             data.message.push({
                 type: "contact",
                 phone_number: ctx.message.contact.phone_number,
@@ -1104,6 +1178,31 @@ const adapter = new class TelegramAdapter {
                 emoji: ctx.message.dice.emoji,
                 value: ctx.message.dice.value,
             })
+        }
+
+        // 非文本消息的友好 raw_message 回退（对标 OneBot 规范，避免 loader.js 日志 dump 整个 Grammy 对象）
+        if (!data.raw_message) {
+            if (ctx.message.sticker) data.raw_message = "[贴纸]"
+            else if (ctx.message.photo) data.raw_message = "[图片]"
+            else if (ctx.message.video) data.raw_message = "[视频]"
+            else if (ctx.message.voice) data.raw_message = "[语音]"
+            else if (ctx.message.audio) data.raw_message = "[音频]"
+            else if (ctx.message.document) data.raw_message = "[文件]"
+            else if (ctx.message.animation) data.raw_message = "[动图]"
+            else if (ctx.message.location) data.raw_message = "[位置]"
+            else if (ctx.message.contact) data.raw_message = "[联系人]"
+            else if (ctx.message.poll) data.raw_message = "[投票]"
+            else if (ctx.message.dice) data.raw_message = "[骰子]"
+        }
+
+        // 未识别的消息类型：打印原始结构便于排查（例如 Bot 发送的新类型消息）
+        if (!data.raw_message) {
+            const ignoreKeys = ["message_id", "from", "chat", "date", "message_thread_id", "is_topic_message", "sender_chat", "reply_to_message", "via_bot", "reply_markup", "entities", "caption_entities"]
+            const keys = Object.keys(ctx.message).filter(k => !ignoreKeys.includes(k))
+            data.raw_message = `[未知消息:${keys.join(",") || "空"}]`
+            try {
+                Bot.makeLog("info", `未知消息原始结构：${JSON.stringify(ctx.message)}`, data.self_id)
+            } catch { }
         }
 
         // 消息制作
@@ -1273,7 +1372,7 @@ const adapter = new class TelegramAdapter {
                     base.raw_message = first.message.text || first.message.caption || "";
                     const replyTo = first.message.reply_to_message;
                     if (replyTo?.message_id) {
-                        base.message.push({ type: "reply", id: replyTo.message_id, text: replyTo.text || replyTo.caption || "" });
+                        base.message.push({ type: "reply", id: replyTo.message_id, text: this.extractText(replyTo).text });
                     }
                     if (base.raw_message) base.message.push({ type: "text", text: base.raw_message });
 
@@ -1554,8 +1653,8 @@ const adapter = new class TelegramAdapter {
                     user_id: `tg_${from.id}`,
                     nickname: from.first_name || from.username || "Unknown",
                 },
-                raw_message: m.text || m.caption || "",
-                entities: m.entities || m.caption_entities || [],
+                raw_message: this.extractText(m).text,
+                entities: this.extractText(m).entities,
                 via_bot: m.via_bot,
                 raw: m,
             };
